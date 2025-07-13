@@ -5,6 +5,22 @@ import domtoimage from "dom-to-image";
 import { supabase } from "./supabaseClient";
 import "./styles.css";
 
+const getUserFromURL = (): string => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("user") || "Anonyme";
+};
+
+const logChange = async (user: string, action: string, details: object) => {
+  const { error } = await supabase.from("logs").insert([
+    {
+      user,
+      action,
+      details,
+    },
+  ]);
+  if (error) console.error("❌ Erreur journalisation :", error.message);
+};
+
 const predefinedGroups = [
   "Famille Konkobo",
   "Famille Ganemtore",
@@ -79,14 +95,53 @@ export default function App() {
   // Load from Supabase on mount
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from("tables").select("data").single();
-      if (data?.data) setTables(data.data);
+      const { data, error } = await supabase
+        .from("tables")
+        .select("data")
+        .eq("id", 1)
+        .single();
+
+      if (error) {
+        console.error("❌ Erreur chargement Supabase :", error.message);
+      } else {
+        console.log("✅ Données récupérées Supabase :", data);
+        setTables(data.data);
+      }
     })();
+  }, []);
+
+  // Listen to realtime updates
+  useEffect(() => {
+    const channel = supabase
+      .channel("realtime-tables")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "tables", filter: "id=eq.1" },
+        (payload) => {
+          const updatedData = (payload.new as any).data;
+          setTables(updatedData);
+          console.log("📥 Mise à jour reçue en temps réel :", updatedData);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   // Save to Supabase on change
   useEffect(() => {
-    supabase.from("tables").upsert({ id: 1, data: tables });
+    supabase
+      .from("tables")
+      .upsert([{ id: 1, data: tables }])
+      .then(({ error }) => {
+        if (error) {
+          console.error("Erreur enregistrement Supabase :", error.message);
+        } else {
+          console.log("✅ Données sauvegardées dans Supabase !");
+        }
+      });
   }, [tables]);
 
   const handleMouseDown = (e: React.MouseEvent, id: number) => {
@@ -110,32 +165,54 @@ export default function App() {
   };
 
   const updateChair = (tableId: number, chairId: number, field: string, value: string) => {
+    const user = getUserFromURL();
     setTables((prev) =>
-      prev.map((t) =>
-        t.id === tableId
-          ? {
-              ...t,
-              chairs: t.chairs.map((c) =>
-                c.id === chairId ? { ...c, [field]: value } : c
-              ),
+      prev.map((t) => {
+        if (t.id === tableId) {
+          const updatedChairs = t.chairs.map((c) => {
+            if (c.id === chairId) {
+              const previous = { ...c };
+              const updated = { ...c, [field]: value };
+              logChange(user, "update_chair", {
+                tableId,
+                chairId,
+                field,
+                previous,
+                updated,
+              });
+              return updated;
             }
-          : t
-      )
+            return c;
+          });
+          return { ...t, chairs: updatedChairs };
+        }
+        return t;
+      })
     );
   };
+  
 
   const adjustChairCount = (tableId: number, delta: number) => {
+    const user = getUserFromURL();
     setTables((prev) =>
       prev.map((t) => {
         if (t.id !== tableId || t.special) return t;
-        const newCount = Math.max(1, Math.min(10, t.chairs.length + delta));
+        const previous = t.chairs.length;
+        const newCount = Math.max(1, Math.min(10, previous + delta));
+        const newChairs = createChairs(t.id, newCount, t.chairs);
+        logChange(user, "adjust_chair_count", {
+          tableId,
+          before: previous,
+          after: newCount,
+        });
         return {
           ...t,
-          chairs: createChairs(t.id, newCount, t.chairs),
+          chairs: newChairs,
         };
       })
     );
   };
+  
 
   const exportToPDF = async () => {
     const pdf = new jsPDF("l", "pt", "a4");
@@ -169,7 +246,6 @@ export default function App() {
       y += lineHeight;
     });
 
-    // Page récapitulatif des groupes
     pdf.addPage();
     y = margin;
 
@@ -185,14 +261,16 @@ export default function App() {
       })
     );
 
-    Object.keys(groupCount).sort().forEach((group) => {
-      if (y > 550) {
-        pdf.addPage();
-        y = margin;
-      }
-      pdf.text(`- ${group} : ${groupCount[group]} invité(s)`, margin, y);
-      y += lineHeight;
-    });
+    Object.keys(groupCount)
+      .sort()
+      .forEach((group) => {
+        if (y > 550) {
+          pdf.addPage();
+          y = margin;
+        }
+        pdf.text(`- ${group} : ${groupCount[group]} invité(s)`, margin, y);
+        y += lineHeight;
+      });
 
     pdf.save("plan_de_table.pdf");
   };
