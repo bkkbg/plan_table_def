@@ -91,8 +91,9 @@ export default function App() {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [showRecap, setShowRecap] = useState(false);
   const planRef = useRef(null);
+  const isLocalUpdate = useRef(false);
 
-  // Load from Supabase on mount
+  // Load initial data from Supabase
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -110,7 +111,7 @@ export default function App() {
     })();
   }, []);
 
-  // Listen to realtime updates
+  // Realtime updates
   useEffect(() => {
     const channel = supabase
       .channel("realtime-tables")
@@ -119,8 +120,8 @@ export default function App() {
         { event: "UPDATE", schema: "public", table: "tables", filter: "id=eq.1" },
         (payload) => {
           const updatedData = (payload.new as any).data;
-          setTables(updatedData);
           console.log("📥 Mise à jour reçue en temps réel :", updatedData);
+          setTables(updatedData);
         }
       )
       .subscribe();
@@ -130,18 +131,21 @@ export default function App() {
     };
   }, []);
 
-  // Save to Supabase on change
+  // Save changes to Supabase
   useEffect(() => {
-    supabase
-      .from("tables")
-      .upsert([{ id: 1, data: tables }])
-      .then(({ error }) => {
-        if (error) {
-          console.error("Erreur enregistrement Supabase :", error.message);
-        } else {
-          console.log("✅ Données sauvegardées dans Supabase !");
-        }
-      });
+    if (!isLocalUpdate.current) return;
+
+    const save = async () => {
+      const { error } = await supabase.from("tables").upsert([{ id: 1, data: tables }]);
+      if (error) {
+        console.error("Erreur enregistrement Supabase :", error.message);
+      } else {
+        console.log("✅ Données sauvegardées dans Supabase !");
+      }
+    };
+
+    save();
+    isLocalUpdate.current = false;
   }, [tables]);
 
   const handleMouseDown = (e: React.MouseEvent, id: number) => {
@@ -166,6 +170,7 @@ export default function App() {
 
   const updateChair = (tableId: number, chairId: number, field: string, value: string) => {
     const user = getUserFromURL();
+    isLocalUpdate.current = true;
     setTables((prev) =>
       prev.map((t) => {
         if (t.id === tableId) {
@@ -190,10 +195,10 @@ export default function App() {
       })
     );
   };
-  
 
   const adjustChairCount = (tableId: number, delta: number) => {
     const user = getUserFromURL();
+    isLocalUpdate.current = true;
     setTables((prev) =>
       prev.map((t) => {
         if (t.id !== tableId || t.special) return t;
@@ -212,7 +217,6 @@ export default function App() {
       })
     );
   };
-  
 
   const exportToPDF = async () => {
     const pdf = new jsPDF("l", "pt", "a4");
