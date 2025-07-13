@@ -11,13 +11,7 @@ const getUserFromURL = (): string => {
 };
 
 const logChange = async (user: string, action: string, details: object) => {
-  const { error } = await supabase.from("logs").insert([
-    {
-      user,
-      action,
-      details,
-    },
-  ]);
+  const { error } = await supabase.from("logs").insert([{ user, action, details }]);
   if (error) console.error("❌ Erreur journalisation :", error.message);
 };
 
@@ -32,21 +26,8 @@ const predefinedGroups = [
   "Collègues KONKOBO",
 ];
 
-interface Chair {
-  id: number;
-  name: string;
-  group: string;
-  angle: number;
-}
-
-interface Table {
-  id: number;
-  x: number;
-  y: number;
-  chairs: Chair[];
-  isDragging: boolean;
-  special?: boolean;
-}
+interface Chair { id: number; name: string; group: string; angle: number; }
+interface Table { id: number; x: number; y: number; chairs: Chair[]; isDragging: boolean; special?: boolean; }
 
 const createChairs = (tableId: number, count = 10, prevChairs: Chair[] = []): Chair[] => {
   const angleStep = (2 * Math.PI) / count;
@@ -60,10 +41,9 @@ const createChairs = (tableId: number, count = 10, prevChairs: Chair[] = []): Ch
 
 const generateInitialTables = (): Table[] => {
   const tables: Table[] = [];
+  // Table des mariés (spéciale)
   tables.push({
-    id: 0,
-    x: 700,
-    y: 80,
+    id: 0, x: 700, y: 80,
     chairs: [
       { id: 1, name: "", group: "", angle: 0 },
       { id: 2, name: "", group: "", angle: Math.PI },
@@ -71,8 +51,8 @@ const generateInitialTables = (): Table[] => {
     isDragging: false,
     special: true,
   });
-  const spacingX = 160;
-  const spacingY = 140;
+  // Autres tables
+  const spacingX = 160, spacingY = 140;
   for (let i = 1; i <= 50; i++) {
     const leftSide = i <= 25;
     const row = Math.floor(((i - 1) % 25) / 5);
@@ -91,67 +71,59 @@ export default function App() {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [showRecap, setShowRecap] = useState(false);
   const planRef = useRef(null);
-  const isLocalUpdate = useRef(false);
+  const isLocalUpdate = useRef(false); // **ref pour marquer les mises à jour locales**
 
-  // Load initial data from Supabase
+  // Chargement initial depuis Supabase
   useEffect(() => {
     (async () => {
-      const { data, error } = await supabase
-        .from("tables")
-        .select("data")
-        .eq("id", 1)
-        .single();
-
+      const { data, error } = await supabase.from("tables").select("data").eq("id", 1).single();
       if (error) {
         console.error("❌ Erreur chargement Supabase :", error.message);
-      } else {
+      } else if (data) {
         console.log("✅ Données récupérées Supabase :", data);
         setTables(data.data);
       }
     })();
   }, []);
 
-  // Realtime updates
+  // Abonnement temps réel Supabase (écoute des UPDATE sur table id=1)
   useEffect(() => {
     const channel = supabase
       .channel("realtime-tables")
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "tables", filter: "id=eq.1" },
-        (payload) => {
+        payload => {
           const updatedData = (payload.new as any).data;
           console.log("📥 Mise à jour reçue en temps réel :", updatedData);
           setTables(updatedData);
         }
       )
       .subscribe();
-
     return () => {
       supabase.removeChannel(channel);
     };
   }, []);
 
-  // Save changes to Supabase
+  // Enregistrement sur Supabase des modifications locales
   useEffect(() => {
     if (!isLocalUpdate.current) return;
-
     const save = async () => {
       const { error } = await supabase.from("tables").upsert([{ id: 1, data: tables }]);
       if (error) {
-        console.error("Erreur enregistrement Supabase :", error.message);
+        console.error("❌ Erreur enregistrement Supabase :", error.message);
       } else {
         console.log("✅ Données sauvegardées dans Supabase !");
       }
     };
-
     save();
     isLocalUpdate.current = false;
   }, [tables]);
 
   const handleMouseDown = (e: React.MouseEvent, id: number) => {
     setDragOffset({ x: e.clientX, y: e.clientY });
-    setTables((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, isDragging: true } : t))
+    setTables(prev =>
+      prev.map(t => (t.id === id ? { ...t, isDragging: true } : t))
     );
   };
 
@@ -159,31 +131,38 @@ export default function App() {
     const dx = e.clientX - dragOffset.x;
     const dy = e.clientY - dragOffset.y;
     setDragOffset({ x: e.clientX, y: e.clientY });
-    setTables((prev) =>
-      prev.map((t) => (t.isDragging ? { ...t, x: t.x + dx, y: t.y + dy } : t))
+    setTables(prev =>
+      prev.map(t => (t.isDragging ? { ...t, x: t.x + dx, y: t.y + dy } : t))
     );
   };
 
   const handleMouseUp = () => {
-    setTables((prev) => prev.map((t) => ({ ...t, isDragging: false })));
+    const user = getUserFromURL();
+    setTables(prev =>
+      prev.map(t => {
+        if (t.isDragging) {
+          // Log du déplacement et marquage pour sauvegarde
+          logChange(user, "move_table", { tableId: t.id, newX: t.x, newY: t.y });
+          isLocalUpdate.current = true;
+          return { ...t, isDragging: false };
+        }
+        return { ...t, isDragging: false };
+      })
+    );
   };
 
   const updateChair = (tableId: number, chairId: number, field: string, value: string) => {
     const user = getUserFromURL();
     isLocalUpdate.current = true;
-    setTables((prev) =>
-      prev.map((t) => {
+    setTables(prev =>
+      prev.map(t => {
         if (t.id === tableId) {
-          const updatedChairs = t.chairs.map((c) => {
+          const updatedChairs = t.chairs.map(c => {
             if (c.id === chairId) {
               const previous = { ...c };
               const updated = { ...c, [field]: value };
               logChange(user, "update_chair", {
-                tableId,
-                chairId,
-                field,
-                previous,
-                updated,
+                tableId, chairId, field, previous, updated,
               });
               return updated;
             }
@@ -199,21 +178,16 @@ export default function App() {
   const adjustChairCount = (tableId: number, delta: number) => {
     const user = getUserFromURL();
     isLocalUpdate.current = true;
-    setTables((prev) =>
-      prev.map((t) => {
+    setTables(prev =>
+      prev.map(t => {
         if (t.id !== tableId || t.special) return t;
         const previous = t.chairs.length;
         const newCount = Math.max(1, Math.min(10, previous + delta));
         const newChairs = createChairs(t.id, newCount, t.chairs);
         logChange(user, "adjust_chair_count", {
-          tableId,
-          before: previous,
-          after: newCount,
+          tableId, before: previous, after: newCount,
         });
-        return {
-          ...t,
-          chairs: newChairs,
-        };
+        return { ...t, chairs: newChairs };
       })
     );
   };
@@ -225,64 +199,57 @@ export default function App() {
       pdf.addImage(planImg, "PNG", 0, 0, 820, 580);
     }
     pdf.addPage();
-
-    const lineHeight = 20;
-    const margin = 40;
-    let y = margin;
-
-    pdf.setFontSize(16);
-    pdf.setFont("helvetica", "bold");
-    pdf.text("Récapitulatif des invités par table", margin, y);
+    let y = 40;
+    pdf.setFontSize(16).setFont("helvetica", "bold");
+    pdf.text("Récapitulatif des invités par table", 40, y);
     y += 30;
     pdf.setFontSize(10);
 
-    tables.forEach((table) => {
+    tables.forEach(table => {
       const title = table.special ? "Table des mariés" : `Table ${table.id}`;
       const names = table.chairs
-        .map((c) => `${c.name || "(vide)"}${c.group ? ` (${c.group})` : ""}`)
+        .map(c => `${c.name || "(vide)"}${c.group ? ` (${c.group})` : ""}`)
         .join(", ");
-
-      if (y > 550) {
-        pdf.addPage();
-        y = margin;
-      }
-      pdf.text(`• ${title} : ${names}`, margin, y);
-      y += lineHeight;
+      if (y > 550) { pdf.addPage(); y = 40; }
+      pdf.text(`• ${title} : ${names}`, 40, y);
+      y += 20;
     });
 
     pdf.addPage();
-    y = margin;
-
+    y = 40;
     pdf.setFontSize(16);
-    pdf.text("Récapitulatif des groupes (nombre d'invités)", margin, y);
+    pdf.text("Récapitulatif des groupes (nombre d'invités)", 40, y);
     y += 30;
     pdf.setFontSize(12);
 
-    const groupCount: { [key: string]: number } = {};
-    tables.forEach((t) =>
-      t.chairs.forEach((c) => {
+    const groupCount: Record<string, number> = {};
+    tables.forEach(t =>
+      t.chairs.forEach(c => {
         if (c.group) groupCount[c.group] = (groupCount[c.group] || 0) + 1;
       })
     );
-
-    Object.keys(groupCount)
-      .sort()
-      .forEach((group) => {
-        if (y > 550) {
-          pdf.addPage();
-          y = margin;
-        }
-        pdf.text(`- ${group} : ${groupCount[group]} invité(s)`, margin, y);
-        y += lineHeight;
-      });
+    Object.keys(groupCount).sort().forEach(group => {
+      if (y > 550) { pdf.addPage(); y = 40; }
+      pdf.text(`- ${group} : ${groupCount[group]} invité(s)`, 40, y);
+      y += 20;
+    });
 
     pdf.save("plan_de_table.pdf");
   };
 
   return (
-    <div onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onClick={() => setSelectedChair(null)}>
+    <div
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onClick={() => setSelectedChair(null)}
+    >
       <div className="controls">
-        <input type="text" placeholder="🔍 Rechercher un invité" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input
+          type="text"
+          placeholder="🔍 Rechercher un invité"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
         <button onClick={() => setShowRecap(!showRecap)}>
           {showRecap ? "Masquer" : "Afficher"} le récapitulatif
         </button>
@@ -291,8 +258,14 @@ export default function App() {
       <svg ref={planRef} width="1600" height="2200" style={{ background: "#f0f4f8" }}>
         <rect x={740} y={0} width={120} height={2200} fill="#e5e7eb" />
         <line x1={800} y1={0} x2={800} y2={2200} stroke="#9ca3af" strokeWidth={2} />
-        {tables.map((table) => (
-          <g key={table.id} transform={`translate(${table.x},${table.y})`} onMouseDown={(e) => handleMouseDown(e, table.id)} style={{ cursor: "move" }} onClick={(e) => e.stopPropagation()}>
+        {tables.map(table => (
+          <g
+            key={table.id}
+            transform={`translate(${table.x},${table.y})`}
+            onMouseDown={e => handleMouseDown(e, table.id)}
+            onClick={e => e.stopPropagation()}
+            style={{ cursor: "move", userSelect: "none" }}
+          >
             {table.special ? (
               <>
                 <rect width={100} height={40} x={-50} y={-20} fill="#facc15" stroke="#000" />
@@ -302,25 +275,49 @@ export default function App() {
               <>
                 <circle r={50} fill={table.id % 2 === 0 ? "#bbf7d0" : "#bfdbfe"} stroke="#000" />
                 <text textAnchor="middle" y={0} fontSize={12}>Table {table.id}</text>
-                <text x={-10} y={20} fontSize={14} onClick={(e) => { e.stopPropagation(); adjustChairCount(table.id, -1); }} style={{ cursor: "pointer" }}>−</text>
-                <text x={10} y={20} fontSize={14} onClick={(e) => { e.stopPropagation(); adjustChairCount(table.id, 1); }} style={{ cursor: "pointer" }}>+</text>
+                <text
+                  x={-10} y={20} fontSize={14}
+                  onClick={e => { e.stopPropagation(); adjustChairCount(table.id, -1); }}
+                  style={{ cursor: "pointer" }}
+                >−</text>
+                <text
+                  x={10} y={20} fontSize={14}
+                  onClick={e => { e.stopPropagation(); adjustChairCount(table.id, 1); }}
+                  style={{ cursor: "pointer" }}
+                >+</text>
               </>
             )}
-            {table.chairs.map((chair) => {
+            {table.chairs.map(chair => {
               const cx = 70 * Math.cos(chair.angle);
               const cy = 70 * Math.sin(chair.angle);
-              const isMatch = search && (chair.name.toLowerCase().includes(search.toLowerCase()) || chair.group.toLowerCase().includes(search.toLowerCase()));
+              const isMatch =
+                search &&
+                (chair.name.toLowerCase().includes(search.toLowerCase()) ||
+                  chair.group.toLowerCase().includes(search.toLowerCase()));
               return (
-                <g key={chair.id} transform={`translate(${cx}, ${cy})`} onClick={(e) => { e.stopPropagation(); setSelectedChair(chair.id); }}>
+                <g
+                  key={chair.id}
+                  transform={`translate(${cx}, ${cy})`}
+                  onClick={e => { e.stopPropagation(); setSelectedChair(chair.id); }}
+                >
                   <circle r={14} fill={isMatch ? "#fef08a" : "#93c5fd"} stroke="#0369a1" />
                   {selectedChair === chair.id ? (
                     <foreignObject x={-40} y={-20} width={80} height={50}>
                       <div style={{ display: "flex", flexDirection: "column" }}>
-                        <input value={chair.name} onChange={(e) => updateChair(table.id, chair.id, "name", e.target.value)} placeholder="Nom" autoFocus style={{ fontSize: 10, width: "100%" }} />
-                        <select value={chair.group} onChange={(e) => updateChair(table.id, chair.id, "group", e.target.value)} style={{ fontSize: 10, width: "100%" }}>
+                        <input
+                          value={chair.name}
+                          onChange={e => updateChair(table.id, chair.id, "name", e.target.value)}
+                          placeholder="Nom" autoFocus
+                          style={{ fontSize: 10, width: "100%" }}
+                        />
+                        <select
+                          value={chair.group}
+                          onChange={e => updateChair(table.id, chair.id, "group", e.target.value)}
+                          style={{ fontSize: 10, width: "100%" }}
+                        >
                           <option value="">-- Sélectionner un groupe --</option>
-                          {predefinedGroups.map((group, index) => (
-                            <option key={index} value={group}>{group}</option>
+                          {predefinedGroups.map((group, idx) => (
+                            <option key={idx} value={group}>{group}</option>
                           ))}
                         </select>
                       </div>
