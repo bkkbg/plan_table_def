@@ -1,24 +1,28 @@
-// App.tsx
+// src/App.tsx
 import React, { useState, useRef, useEffect } from "react";
 import jsPDF from "jspdf";
 import domtoimage from "dom-to-image";
 import { supabase } from "./supabaseClient";
 import "./styles.css";
 
+// Helper: read ?user= from URL; default to "Anonyme"
 const getUserFromURL = (): string => {
   const params = new URLSearchParams(window.location.search);
   return params.get("user") || "Anonyme";
 };
 
-const logChange = async (user: string, action: string, details: object) => {
-  const { error } = await supabase.from("logs").insert([
-    {
-      user,
-      action,
-      details,
-    },
-  ]);
-  if (error) console.error("❌ Erreur journalisation :", error.message);
+// Helper: write to logs table; call after each save/reset/chair update/move
+const logChange = async (
+  user: string,
+  action: string,
+  details: object
+): Promise<void> => {
+  const { error } = await supabase
+    .from("logs")
+    .insert([{ user, action, details }]);
+  if (error) {
+    console.error("❌ Erreur journalisation :", error.message);
+  }
 };
 
 const predefinedGroups = [
@@ -38,7 +42,6 @@ interface Chair {
   group: string;
   angle: number;
 }
-
 interface Table {
   id: number;
   x: number;
@@ -48,6 +51,7 @@ interface Table {
   special?: boolean;
 }
 
+// Build a chairs array for each table
 const createChairs = (
   tableId: number,
   count = 10,
@@ -62,9 +66,9 @@ const createChairs = (
   }));
 };
 
+// Initial layout: one special table (mariés) + 50 round tables
 const generateInitialTables = (): Table[] => {
   const tables: Table[] = [];
-  // Table des mariés (spéciale)
   tables.push({
     id: 0,
     x: 700,
@@ -76,7 +80,6 @@ const generateInitialTables = (): Table[] => {
     isDragging: false,
     special: true,
   });
-  // 50 tables autour
   const spacingX = 160;
   const spacingY = 140;
   for (let i = 1; i <= 50; i++) {
@@ -97,25 +100,27 @@ const generateInitialTables = (): Table[] => {
 };
 
 export default function App() {
+  // The current tables (edited locally)
   const [tables, setTables] = useState<Table[]>(generateInitialTables());
+  // The last version that was saved to Supabase
+  const [savedTables, setSavedTables] = useState<Table[]>(generateInitialTables());
+  // Indicate there are local edits not yet saved
+  const [unsavedChanges, setUnsavedChanges] = useState(false);
+  // History panel toggle and loaded log entries
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
+
+  // UI and drag helpers
   const [selectedChair, setSelectedChair] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [showRecap, setShowRecap] = useState(false);
   const planRef = useRef<SVGSVGElement | null>(null);
 
-  /** 
-   * Flag pour savoir si la modification provient du client.
-   * Si oui, on enverra un `upsert` vers Supabase (effet ci-dessous).
-   */
+  // Flags to avoid sync loops: local updates vs. remote updates
   const isLocalUpdate = useRef(false);
-  /** 
-   * Flag pour savoir si la modification provient de Supabase (realtime).
-   * Dans ce cas, on ne renverra pas les données, sinon on serait en boucle.
-   */
   const isRemoteUpdate = useRef(false);
 
-  // Chargement initial depuis Supabase
+  /** 1. Load saved data on mount */
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -123,64 +128,60 @@ export default function App() {
         .select("data")
         .eq("id", 1)
         .single();
-
       if (error) {
-        console.error("❌ Erreur chargement Supabase :", error.message);
       } else if (data?.data) {
         setTables(data.data);
+        setSavedTables(data.data);
       }
     })();
   }, []);
 
-  // Écoute temps réel des modifications faites par d’autres
+  /** 2. Listen for remote updates via realtime; update savedTables and tables 
+   *    only if there are no unsaved changes.
+   */
   useEffect(() => {
     const channel = supabase
       .channel("realtime-tables")
       .on(
         "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "tables",
-          filter: "id=eq.1",
-        },
+        { event: "UPDATE", schema: "public", table: "tables", filter: "id=eq.1" },
         (payload) => {
-          isRemoteUpdate.current = true;
           const updatedData = (payload.new as any).data;
-          setTables(updatedData);
+          isRemoteUpdate.current = true;
+          setSavedTables(updatedData);
+          // If there are unsaved changes locally, keep working copy; otherwise update
+          setTables((prev) => {
+            return unsavedChanges ? prev : updatedData;
+          });
         }
       )
       .subscribe();
+
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [unsavedChanges]);
 
-  // Sauvegarde automatique dans Supabase si la mise à jour est locale
+  /** 3. Save local updates to Supabase when isLocalUpdate flag is set */
   useEffect(() => {
     if (isRemoteUpdate.current) {
-      // On ignore la sauvegarde si la mise à jour vient du serveur
       isRemoteUpdate.current = false;
       return;
     }
-
     if (!isLocalUpdate.current) return;
 
     const save = async () => {
-      const { error } = await supabase
-        .from("tables")
-        .upsert([{ id: 1, data: tables }]);
-      if (error) {
-        console.error("❌ Erreur enregistrement Supabase :", error.message);
+      const { error } = await supabase.from("tables").upsert([{ id: 1, data: tables }]);
+      if (!error) {
+        setSavedTables(tables);
+        setUnsavedChanges(false);
       }
     };
-
     save();
-    // On remet à faux pour la prochaine mise à jour
     isLocalUpdate.current = false;
   }, [tables]);
 
-  // Gestion du drag & drop
+  /** 4. Drag & drop handlers */
   const handleMouseDown = (e: React.MouseEvent, id: number) => {
     setDragOffset({ x: e.clientX, y: e.clientY });
     setTables((prev) =>
@@ -192,6 +193,7 @@ export default function App() {
     const dx = e.clientX - dragOffset.x;
     const dy = e.clientY - dragOffset.y;
     setDragOffset({ x: e.clientX, y: e.clientY });
+    // update positions in place (no save yet)
     setTables((prev) =>
       prev.map((t) =>
         t.isDragging ? { ...t, x: t.x + dx, y: t.y + dy } : t
@@ -201,16 +203,13 @@ export default function App() {
 
   const handleMouseUp = () => {
     const user = getUserFromURL();
-    // On log tous les changements de position de table
+    // finish dragging, but only mark unsavedChanges if position changed
     setTables((prev) =>
       prev.map((t) => {
         if (t.isDragging) {
-          logChange(user, "move_table", {
-            tableId: t.id,
-            newX: t.x,
-            newY: t.y,
-          });
+          logChange(user, "move_table", { tableId: t.id, newX: t.x, newY: t.y });
           isLocalUpdate.current = true;
+          setUnsavedChanges(true);
           return { ...t, isDragging: false };
         }
         return { ...t, isDragging: false };
@@ -218,14 +217,10 @@ export default function App() {
     );
   };
 
-  // Mise à jour d'un siège (nom ou groupe)
-  const updateChair = (
-    tableId: number,
-    chairId: number,
-    field: string,
-    value: string
-  ) => {
+  /** 5. Update a chair's name or group and mark unsaved changes */
+  const updateChair = (tableId: number, chairId: number, field: string, value: string) => {
     const user = getUserFromURL();
+    setUnsavedChanges(true);
     isLocalUpdate.current = true;
     setTables((prev) =>
       prev.map((t) => {
@@ -252,9 +247,10 @@ export default function App() {
     );
   };
 
-  // Ajustement du nombre de sièges
+  /** 6. Adjust number of chairs and mark unsaved changes */
   const adjustChairCount = (tableId: number, delta: number) => {
     const user = getUserFromURL();
+    setUnsavedChanges(true);
     isLocalUpdate.current = true;
     setTables((prev) =>
       prev.map((t) => {
@@ -272,7 +268,47 @@ export default function App() {
     );
   };
 
-  // Export en PDF (identique à la version précédente)
+  /** 7. Manual Save: persist current tables to Supabase immediately */
+  const handleSave = async () => {
+    isLocalUpdate.current = true;
+    setUnsavedChanges(false);
+    const user = getUserFromURL();
+    const { error } = await supabase.from("tables").upsert([{ id: 1, data: tables }]);
+    if (!error) {
+      setSavedTables(tables);
+      await logChange(user, "save_tables", { version: new Date().toISOString() });
+    } else {
+      console.error("Erreur enregistrement Supabase :", error.message);
+    }
+  };
+
+  /** 8. Reset: revert to last saved state and abandon unsaved changes */
+  const handleReset = () => {
+    setTables(savedTables);
+    setUnsavedChanges(false);
+    isLocalUpdate.current = false;
+    const user = getUserFromURL();
+    logChange(user, "reset_changes", {});
+  };
+
+  /** 9. Toggle and fetch history from logs table */
+  const toggleHistory = async () => {
+    if (showHistory) {
+      setShowHistory(false);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("logs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (!error) {
+      setHistory(data || []);
+    }
+    setShowHistory(true);
+  };
+
+  /** 10. Export plan + tables + group summary as PDF (unchanged) */
   const exportToPDF = async () => {
     const pdf = new jsPDF("l", "pt", "a4");
     if (planRef.current) {
@@ -299,14 +335,12 @@ export default function App() {
       y += 20;
     });
 
-    // Page des groupes
     pdf.addPage();
     y = 40;
     pdf.setFontSize(16);
     pdf.text("Récapitulatif des groupes (nombre d'invités)", 40, y);
     y += 30;
     pdf.setFontSize(12);
-
     const groupCount: { [key: string]: number } = {};
     tables.forEach((t) =>
       t.chairs.forEach((c) => {
@@ -323,10 +357,10 @@ export default function App() {
         pdf.text(`- ${group} : ${groupCount[group]} invité(s)`, 40, y);
         y += 20;
       });
-
     pdf.save("plan_de_table.pdf");
   };
 
+  /** Render UI and history panel */
   return (
     <div
       onMouseMove={handleMouseMove}
@@ -334,140 +368,155 @@ export default function App() {
       onClick={() => setSelectedChair(null)}
     >
       <div className="controls">
-        <input
-          type="text"
-          placeholder="🔍 Rechercher un invité"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <button onClick={() => setShowRecap(!showRecap)}>
-          {showRecap ? "Masquer" : "Afficher"} le récapitulatif
-        </button>
-        <button onClick={exportToPDF}>📄 Exporter PDF</button>
-      </div>
-      <svg ref={planRef} width="1600" height="2200" style={{ background: "#f0f4f8" }}>
-        <rect x={740} y={0} width={120} height={2200} fill="#e5e7eb" />
-        <line
-          x1={800}
-          y1={0}
-          x2={800}
-          y2={2200}
-          stroke="#9ca3af"
-          strokeWidth={2}
-        />
-        {tables.map((table) => (
-          <g
-            key={table.id}
-            transform={`translate(${table.x},${table.y})`}
-            onMouseDown={(e) => handleMouseDown(e, table.id)}
-            onClick={(e) => e.stopPropagation()}
-            style={{ cursor: "move", userSelect: "none" }}
-          >
-            {table.special ? (
-              <>
-                <rect width={100} height={40} x={-50} y={-20} fill="#facc15" stroke="#000" />
-                <text textAnchor="middle" y={5} fontSize={14}>
-                  Table Mariés
-                </text>
-              </>
-            ) : (
-              <>
-                <circle
-                  r={50}
-                  fill={table.id % 2 === 0 ? "#bbf7d0" : "#bfdbfe"}
-                  stroke="#000"
-                />
-                <text textAnchor="middle" y={0} fontSize={12}>
-                  Table {table.id}
-                </text>
-                <text
-                  x={-10}
-                  y={20}
-                  fontSize={14}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    adjustChairCount(table.id, -1);
-                  }}
-                  style={{ cursor: "pointer" }}
-                >
-                  −
-                </text>
-                <text
-                  x={10}
-                  y={20}
-                  fontSize={14}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    adjustChairCount(table.id, 1);
-                  }}
-                  style={{ cursor: "pointer" }}
-                >
-                  +
-                </text>
-              </>
-            )}
-            {table.chairs.map((chair) => {
-              const cx = 70 * Math.cos(chair.angle);
-              const cy = 70 * Math.sin(chair.angle);
-              const isMatch =
-                search &&
-                (chair.name.toLowerCase().includes(search.toLowerCase()) ||
-                  chair.group.toLowerCase().includes(search.toLowerCase()));
-              return (
-                <g
-                  key={chair.id}
-                  transform={`translate(${cx}, ${cy})`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedChair(chair.id);
-                  }}
-                >
-                  <circle
-                    r={14}
-                    fill={isMatch ? "#fef08a" : "#93c5fd"}
-                    stroke="#0369a1"
-                  />
-                  {selectedChair === chair.id ? (
-                    <foreignObject x={-40} y={-20} width={80} height={50}>
-                      <div style={{ display: "flex", flexDirection: "column" }}>
-                        <input
-                          value={chair.name}
-                          onChange={(e) =>
-                            updateChair(table.id, chair.id, "name", e.target.value)
-                          }
-                          placeholder="Nom"
-                          autoFocus
-                          style={{ fontSize: 10, width: "100%" }}
-                        />
-                        <select
-                          value={chair.group}
-                          onChange={(e) =>
-                            updateChair(table.id, chair.id, "group", e.target.value)
-                          }
-                          style={{ fontSize: 10, width: "100%" }}
-                        >
-                          <option value="">-- Sélectionner un groupe --</option>
-                          {predefinedGroups.map((group, idx) => (
-                            <option key={idx} value={group}>
-                              {group}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </foreignObject>
-                  ) : (
-                    chair.name && (
-                      <text y={4} textAnchor="middle" fontSize={10}>
-                        {chair.name}
-                      </text>
-                    )
-                  )}
-                </g>
-              );
-            })}
-          </g>
-        ))}
-      </svg>
+      <input
+        type="text"
+        placeholder="🔍 Rechercher un invité"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+      <button onClick={() => setShowRecap(!showRecap)}>
+        {showRecap ? "Masquer" : "Afficher"} le récapitulatif
+      </button>
+      <button onClick={handleSave} disabled={!unsavedChanges}>
+        💾 Sauvegarder
+      </button>
+      <button onClick={handleReset} disabled={!unsavedChanges}>
+        ♻️ Réinitialiser
+      </button>
+      <button onClick={toggleHistory}>
+        {showHistory ? "Fermer l'historique" : "Voir l'historique"}
+      </button>
+      <button onClick={exportToPDF}>📄 Exporter PDF</button>
     </div>
+
+    <svg ref={planRef} width="1600" height="2200" style={{ background: "#f0f4f8" }}>
+      <rect x={740} y={0} width={120} height={2200} fill="#e5e7eb" />
+      <line x1={800} y1={0} x2={800} y2={2200} stroke="#9ca3af" strokeWidth={2} />
+
+      {tables.map((table) => (
+        <g
+          key={table.id}
+          transform={`translate(${table.x},${table.y})`}
+          onMouseDown={(e) => handleMouseDown(e, table.id)}
+          onClick={(e) => e.stopPropagation()}
+          style={{ cursor: "move", userSelect: "none" }}
+        >
+          {table.special ? (
+            <>
+              <rect width={100} height={40} x={-50} y={-20} fill="#facc15" stroke="#000" />
+              <text textAnchor="middle" y={5} fontSize={14}>Table Mariés</text>
+            </>
+          ) : (
+            <>
+              <circle r={50} fill={table.id % 2 === 0 ? "#bbf7d0" : "#bfdbfe"} stroke="#000" />
+              <text textAnchor="middle" y={0} fontSize={12}>Table {table.id}</text>
+              <text
+                x={-10}
+                y={20}
+                fontSize={14}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  adjustChairCount(table.id, -1);
+                }}
+                style={{ cursor: "pointer" }}
+              >−</text>
+              <text
+                x={10}
+                y={20}
+                fontSize={14}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  adjustChairCount(table.id, 1);
+                }}
+                style={{ cursor: "pointer" }}
+              >+</text>
+            </>
+          )}
+
+          {table.chairs.map((chair) => {
+            const cx = 70 * Math.cos(chair.angle);
+            const cy = 70 * Math.sin(chair.angle);
+            const isMatch =
+              search &&
+              (chair.name.toLowerCase().includes(search.toLowerCase()) ||
+                chair.group.toLowerCase().includes(search.toLowerCase()));
+            return (
+              <g
+                key={chair.id}
+                transform={`translate(${cx}, ${cy})`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedChair(chair.id);
+                }}
+              >
+                <circle r={14} fill={isMatch ? "#fef08a" : "#93c5fd"} stroke="#0369a1" />
+                {selectedChair === chair.id ? (
+                  <foreignObject x={-40} y={-20} width={80} height={50}>
+                    <div style={{ display: "flex", flexDirection: "column" }}>
+                      <input
+                        value={chair.name}
+                        onChange={(e) => updateChair(table.id, chair.id, "name", e.target.value)}
+                        placeholder="Nom"
+                        autoFocus
+                        style={{ fontSize: 10, width: "100%" }}
+                      />
+                      <select
+                        value={chair.group}
+                        onChange={(e) => updateChair(table.id, chair.id, "group", e.target.value)}
+                        style={{ fontSize: 10, width: "100%" }}
+                      >
+                        <option value="">-- Sélectionner un groupe --</option>
+                        {predefinedGroups.map((group) => (
+                          <option key={group} value={group}>
+                            {group}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </foreignObject>
+                ) : (
+                  chair.name && (
+                    <text y={4} textAnchor="middle" fontSize={10}>
+                      {chair.name}
+                    </text>
+                  )
+                )}
+              </g>
+            );
+          })}
+        </g>
+      ))}
+    </svg>
+
+    {showHistory && (
+      <div
+        style={{
+          position: "fixed",
+          top: 60,
+          right: 10,
+          width: 400,
+          height: 400,
+          overflowY: "auto",
+          background: "#fff",
+          border: "1px solid #ccc",
+          boxShadow: "0 4px 6px rgba(0,0,0,0.1)",
+          padding: 10,
+          zIndex: 100,
+        }}
+      >
+        <h3>Historique des modifications</h3>
+        {history.length === 0 && <p>Aucune entrée.</p>}
+        {history.map((entry, idx) => (
+          <div key={idx} style={{ marginBottom: 8 }}>
+            <strong>{entry.created_at?.replace("T", " ").substring(0, 19)}</strong>
+            <br />
+            <em>{entry.user}</em> — {entry.action}
+            <br />
+            <code style={{ fontSize: 10 }}>{JSON.stringify(entry.details)}</code>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
   );
 }
