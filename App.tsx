@@ -43,7 +43,6 @@ interface Chair {
   group: string;
   angle: number;
 }
-
 interface Table {
   id: number;
   x: number;
@@ -113,6 +112,8 @@ export default function App() {
   // Affichage de l’historique et stockage des logs
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
+  // ⬅️ Manquait : état pour le bouton récapitulatif
+  const [showRecap, setShowRecap] = useState(false);
 
   // Autres états pour l’UI
   const [selectedChair, setSelectedChair] = useState<number | null>(null);
@@ -256,7 +257,7 @@ export default function App() {
     );
   };
 
-  /** 6. Ajuster le nombre de sièges (augmenter ou diminuer) */
+  /** 6. Ajuster le nombre de sièges (augmenter/diminuer) */
   const adjustChairCount = (tableId: number, delta: number) => {
     const user = getUserFromURL();
     setUnsavedChanges(true);
@@ -277,7 +278,7 @@ export default function App() {
     );
   };
 
-  /** 7. Sauvegarde manuelle : persist tables dans Supabase immédiatement */
+  /** 7. Sauvegarde manuelle immédiate */
   const handleSave = async () => {
     isLocalUpdate.current = true;
     setUnsavedChanges(false);
@@ -304,7 +305,7 @@ export default function App() {
     logChange(user, "reset_changes", {});
   };
 
-  /** 9. Afficher ou cacher l’historique ; charger les logs si besoin */
+  /** 9. Afficher/cacher l’historique (charge les 50 derniers logs) */
   const toggleHistory = async () => {
     if (showHistory) {
       setShowHistory(false);
@@ -321,7 +322,7 @@ export default function App() {
     setShowHistory(true);
   };
 
-  /** 10. Exporter en PDF : plan + récapitulatifs */
+  /** 10. Export PDF : plan + récapitulatifs */
   const exportToPDF = async () => {
     const pdf = new jsPDF("l", "pt", "a4");
     if (planRef.current) {
@@ -374,7 +375,7 @@ export default function App() {
     pdf.save("plan_de_table.pdf");
   };
 
-  /** Rendu de l’interface, du plan et de l’historique */
+  /** Rendu */
   return (
     <div
       onMouseMove={handleMouseMove}
@@ -501,21 +502,11 @@ export default function App() {
                   />
                   {selectedChair === chair.id ? (
                     <foreignObject x={-40} y={-20} width={80} height={50}>
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                        }}
-                      >
+                      <div style={{ display: "flex", flexDirection: "column" }}>
                         <input
                           value={chair.name}
                           onChange={(e) =>
-                            updateChair(
-                              table.id,
-                              chair.id,
-                              "name",
-                              e.target.value
-                            )
+                            updateChair(table.id, chair.id, "name", e.target.value)
                           }
                           placeholder="Nom"
                           autoFocus
@@ -524,18 +515,11 @@ export default function App() {
                         <select
                           value={chair.group}
                           onChange={(e) =>
-                            updateChair(
-                              table.id,
-                              chair.id,
-                              "group",
-                              e.target.value
-                            )
+                            updateChair(table.id, chair.id, "group", e.target.value)
                           }
                           style={{ fontSize: 10, width: "100%" }}
                         >
-                          <option value="">
-                            -- Sélectionner un groupe --
-                          </option>
+                          <option value="">-- Sélectionner un groupe --</option>
                           {predefinedGroups.map((group) => (
                             <option key={group} value={group}>
                               {group}
@@ -546,11 +530,7 @@ export default function App() {
                     </foreignObject>
                   ) : (
                     chair.name && (
-                      <text
-                        y={4}
-                        textAnchor="middle"
-                        fontSize={10}
-                      >
+                      <text y={4} textAnchor="middle" fontSize={10}>
                         {chair.name}
                       </text>
                     )
@@ -582,15 +562,11 @@ export default function App() {
           {history.length === 0 && <p>Aucune entrée.</p>}
           {history.map((entry, idx) => (
             <div key={idx} style={{ marginBottom: 8 }}>
-              <strong>
-                {entry.created_at?.replace("T", " ").substring(0, 19)}
-              </strong>
+              <strong>{entry.created_at?.replace("T", " ").substring(0, 19)}</strong>
               <br />
               <em>{entry.user}</em> — {entry.action}
               <br />
-              <code style={{ fontSize: 10 }}>
-                {JSON.stringify(entry.details)}
-              </code>
+              <code style={{ fontSize: 10 }}>{JSON.stringify(entry.details)}</code>
             </div>
           ))}
         </div>
