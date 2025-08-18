@@ -16,7 +16,8 @@ body {
   z-index: 10;
 }
 
-.controls input, .controls button {
+.controls input,
+.controls button {
   padding: 8px;
   font-size: 14px;
 }
