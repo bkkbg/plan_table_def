@@ -128,21 +128,23 @@ export default function App() {
 
   // 2) Realtime : applique les updates distants si on n’a pas de brouillon local
   useEffect(() => {
-    const channel = supabase
-      .channel("realtime-tables")
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "tables", filter: "id=eq.1" },
-        (payload) => {
-          const updatedData = (payload.new as any).data;
-          isRemoteUpdate.current = true;
-          setSavedTables(updatedData);
-          setTables((prev) => (unsavedChanges ? prev : updatedData));
-        }
-      )
-      .subscribe();
-    return () => supabase.removeChannel(channel);
-  }, [unsavedChanges]);
+    const init = async () => {
+      const { data, error } = await supabase
+        .from("tables")
+        .select("data")
+        .eq("id", 1)
+        .single();
+      if (error) {
+        console.error("❌ Échec d'initialisation Supabase :", error.message);
+        alert("Échec d'initialisation Supabase (tables). Voir console.");
+      } else if (data?.data) {
+        setTables(data.data);
+        setSavedTables(data.data);
+        setUnsavedChanges(false);
+      }
+    };
+    init();
+  }, [])
 
   // 3) Sauvegarde automatique quand isLocalUpdate=true
   useEffect(() => {
